@@ -3,13 +3,17 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/sagernet/sing-box/common/srs"
 	C "github.com/sagernet/sing-box/constant"
@@ -17,6 +21,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
+	"go4.org/netipx"
 
 	"github.com/google/go-github/v45/github"
 	"github.com/maxmind/mmdbwriter"
@@ -29,7 +34,10 @@ import (
 var githubClient *github.Client
 
 func init() {
-	accessToken, loaded := os.LookupEnv("ACCESS_TOKEN")
+	accessToken, loaded := os.LookupEnv("GITHUB_TOKEN")
+	if !loaded {
+		accessToken, loaded = os.LookupEnv("ACCESS_TOKEN")
+	}
 	if !loaded {
 		githubClient = github.NewClient(nil)
 		return
@@ -42,11 +50,14 @@ func init() {
 
 func fetch(from string) (*github.RepositoryRelease, error) {
 	names := strings.SplitN(from, "/", 2)
+	if len(names) < 2 {
+		return nil, fmt.Errorf("invalid repository format: %s", from)
+	}
 	latestRelease, _, err := githubClient.Repositories.GetLatestRelease(context.Background(), names[0], names[1])
 	if err != nil {
 		return nil, err
 	}
-	return latestRelease, err
+	return latestRelease, nil
 }
 
 func get(downloadURL *string) ([]byte, error) {
@@ -114,24 +125,6 @@ func newWriter(metadata maxminddb.Metadata, codes []string) (*mmdbwriter.Tree, e
 	})
 }
 
-func open(path string, codes []string) (*mmdbwriter.Tree, error) {
-	reader, err := maxminddb.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	if reader.Metadata.DatabaseType != "sing-geoip" {
-		return nil, E.New("invalid sing-geoip database")
-	}
-	reader.Close()
-
-	return mmdbwriter.Load(path, mmdbwriter.Options{
-		Languages: append(reader.Metadata.Languages, common.Filter(codes, func(it string) bool {
-			return !common.Contains(reader.Metadata.Languages, it)
-		})...),
-		Inserter: inserter.ReplaceWith,
-	})
-}
-
 func write(writer *mmdbwriter.Tree, dataMap map[string][]*net.IPNet, output string, codes []string) error {
 	if len(codes) == 0 {
 		codes = make([]string, 0, len(dataMap))
@@ -164,21 +157,55 @@ func write(writer *mmdbwriter.Tree, dataMap map[string][]*net.IPNet, output stri
 	return err
 }
 
+func setActionOutput(name string, content string) {
+	outputFile := os.Getenv("GITHUB_OUTPUT")
+	if outputFile != "" {
+		f, err := os.OpenFile(outputFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err == nil {
+			defer f.Close()
+			f.WriteString(fmt.Sprintf("%s=%s\n", name, content))
+		}
+	}
+	os.Stdout.WriteString(fmt.Sprintf("::set-output name=%s::%s\n", name, content))
+	log.Info(fmt.Sprintf("action output %s=%s", name, content))
+}
+
 func release(source string, destination string, output string, ruleSetOutput string) error {
 	sourceRelease, err := fetch(source)
 	if err != nil {
 		return err
 	}
-	destinationRelease, err := fetch(destination)
-	if err != nil {
-		log.Warn("missing destination latest release")
-	} else {
-		if os.Getenv("NO_SKIP") != "true" && strings.Contains(*destinationRelease.Name, *sourceRelease.Name) {
-			log.Info("already latest")
-			setActionOutput("skip", "true")
-			return nil
+
+	sourceTag := ""
+	if sourceRelease.TagName != nil {
+		sourceTag = *sourceRelease.TagName
+	}
+	if sourceTag == "" && sourceRelease.Name != nil {
+		sourceTag = *sourceRelease.Name
+	}
+
+	if destination != "" {
+		destinationRelease, err := fetch(destination)
+		if err != nil {
+			log.Warn("missing destination latest release: ", err)
+		} else if destinationRelease != nil {
+			destTag := ""
+			if destinationRelease.TagName != nil {
+				destTag = *destinationRelease.TagName
+			}
+			destName := ""
+			if destinationRelease.Name != nil {
+				destName = *destinationRelease.Name
+			}
+			if os.Getenv("NO_SKIP") != "true" && sourceTag != "" && (strings.Contains(destTag, sourceTag) || strings.Contains(destName, sourceTag)) {
+				log.Info("already latest: ", sourceTag)
+				setActionOutput("skip", "true")
+				setActionOutput("tag", sourceTag)
+				return nil
+			}
 		}
 	}
+
 	binary, err := download(sourceRelease)
 	if err != nil {
 		return err
@@ -192,6 +219,7 @@ func release(source string, destination string, output string, ruleSetOutput str
 		allCodes = append(allCodes, code)
 	}
 
+	// Legacy geoip.db generation
 	writer, err := newWriter(metadata, allCodes)
 	if err != nil {
 		return err
@@ -210,68 +238,123 @@ func release(source string, destination string, output string, ruleSetOutput str
 		return err
 	}
 
+	// Optimized rule-set (.srs and .json) generation with concurrent worker pool
 	os.RemoveAll(ruleSetOutput)
 	err = os.MkdirAll(ruleSetOutput, 0o755)
 	if err != nil {
 		return err
 	}
-	for countryCode, ipNets := range countryMap {
-		var headlessRule option.DefaultHeadlessRule
-		headlessRule.IPCIDR = make([]string, 0, len(ipNets))
-		for _, cidr := range ipNets {
-			headlessRule.IPCIDR = append(headlessRule.IPCIDR, cidr.String())
-		}
-		var plainRuleSet option.PlainRuleSet
-		plainRuleSet.Rules = []option.HeadlessRule{
-			{
-				Type:           C.RuleTypeDefault,
-				DefaultOptions: headlessRule,
-			},
-		}
-		srsPath, _ := filepath.Abs(filepath.Join(ruleSetOutput, "geoip-"+countryCode+".srs"))
-		os.Stderr.WriteString("write " + srsPath + "\n")
-		outputRuleSet, err := os.Create(srsPath)
-		if err != nil {
-			return err
-		}
-		err = srs.Write(outputRuleSet, plainRuleSet, 3)
-		if err != nil {
-			outputRuleSet.Close()
-			return err
-		}
-		outputRuleSet.Close()
 
-		srsPath, _ = filepath.Abs(filepath.Join(ruleSetOutput, "geoip-"+countryCode+".json"))
-		os.Stderr.WriteString("write " + srsPath + "\n")
-		outputRuleSet, err = os.Create(srsPath)
-		if err != nil {
-			return err
-		}
-		je := json.NewEncoder(outputRuleSet)
-		versionPlainRuleSet := option.PlainRuleSetCompat{
-			Options: plainRuleSet,
-			Version: 3,
-		}
-		je.SetEscapeHTML(false)
-		je.SetIndent("", "    ")
-		err = je.Encode(versionPlainRuleSet)
-		if err != nil {
-			outputRuleSet.Close()
-			return err
-		}
-		outputRuleSet.Close()
+	type geoipTask struct {
+		countryCode string
+		ipNets      []*net.IPNet
 	}
 
-	setActionOutput("tag", *sourceRelease.Name)
+	tasks := make(chan geoipTask, len(countryMap))
+	for countryCode, ipNets := range countryMap {
+		tasks <- geoipTask{countryCode: countryCode, ipNets: ipNets}
+	}
+	close(tasks)
+
+	numWorkers := runtime.NumCPU() * 2
+	if numWorkers < 4 {
+		numWorkers = 4
+	}
+
+	var wg sync.WaitGroup
+	var firstErr error
+	var errOnce sync.Once
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for t := range tasks {
+				if firstErr != nil {
+					return
+				}
+
+				// Aggregate and merge contiguous / overlapping CIDRs
+				var builder netipx.IPSetBuilder
+				for _, cidr := range t.ipNets {
+					if prefix, err := netip.ParsePrefix(cidr.String()); err == nil {
+						builder.AddPrefix(prefix)
+					}
+				}
+				ipSet, err := builder.IPSet()
+				if err != nil {
+					errOnce.Do(func() { firstErr = err })
+					return
+				}
+				prefixes := ipSet.Prefixes()
+
+				var headlessRule option.DefaultHeadlessRule
+				headlessRule.IPCIDR = make([]string, len(prefixes))
+				for idx, p := range prefixes {
+					headlessRule.IPCIDR[idx] = p.String()
+				}
+
+				var plainRuleSet option.PlainRuleSet
+				plainRuleSet.Rules = []option.HeadlessRule{
+					{
+						Type:           C.RuleTypeDefault,
+						DefaultOptions: headlessRule,
+					},
+				}
+
+				// Binary SRS
+				srsPath := filepath.Join(ruleSetOutput, "geoip-"+t.countryCode+".srs")
+				outputRuleSet, err := os.Create(srsPath)
+				if err != nil {
+					errOnce.Do(func() { firstErr = err })
+					return
+				}
+				err = srs.Write(outputRuleSet, plainRuleSet, 3)
+				outputRuleSet.Close()
+				if err != nil {
+					errOnce.Do(func() { firstErr = err })
+					return
+				}
+
+				// Formatted JSON
+				jsonPath := filepath.Join(ruleSetOutput, "geoip-"+t.countryCode+".json")
+				outputJSON, err := os.Create(jsonPath)
+				if err != nil {
+					errOnce.Do(func() { firstErr = err })
+					return
+				}
+				je := json.NewEncoder(outputJSON)
+				versionPlainRuleSet := option.PlainRuleSetCompat{
+					Options: plainRuleSet,
+					Version: 3,
+				}
+				je.SetEscapeHTML(false)
+				je.SetIndent("", "    ")
+				err = je.Encode(versionPlainRuleSet)
+				outputJSON.Close()
+				if err != nil {
+					errOnce.Do(func() { firstErr = err })
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return firstErr
+	}
+
+	setActionOutput("tag", sourceTag)
+	setActionOutput("skip", "false")
 	return nil
 }
 
-func setActionOutput(name string, content string) {
-	os.Stdout.WriteString("::set-output name=" + name + "::" + content + "\n")
-}
-
 func main() {
-	err := release("Loyalsoldier/geoip", "flyzstu/sing-geoip", "geoip.db", "rule-set")
+	dest := os.Getenv("GITHUB_REPOSITORY")
+	if dest == "" {
+		dest = "wx2020/sing-box-rules"
+	}
+	err := release("Loyalsoldier/geoip", dest, "geoip.db", "rule-set")
 	if err != nil {
 		log.Fatal(err)
 	}

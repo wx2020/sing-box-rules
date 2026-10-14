@@ -1,2 +1,4 @@
 rule-set
 *.db
+release-assets/
+*.zip

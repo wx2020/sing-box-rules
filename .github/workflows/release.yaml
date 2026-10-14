@@ -1,85 +1,271 @@
 name: Release
+
 on:
+  schedule:
+    - cron: "0 2 * * *"
+    - cron: "0 14 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Force build and release regardless of upstream tag"
+        required: false
+        type: boolean
+        default: false
   push:
     branches:
       - main
-  workflow_dispatch:
-  schedule:
-    - cron: "0 0 * * *"
- 
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
 jobs:
+  check:
+    name: Check Upstream Updates
+    runs-on: ubuntu-latest
+    outputs:
+      need_update: ${{ steps.check.outputs.need_update }}
+      geosite_tag: ${{ steps.check.outputs.geosite_tag }}
+      geoip_tag: ${{ steps.check.outputs.geoip_tag }}
+    steps:
+      - name: Compare Upstream Tags
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          FORCE="${{ github.event.inputs.force }}"
+          if [ "$FORCE" = "true" ]; then
+            echo "Force build requested via workflow_dispatch."
+            echo "need_update=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Fetching upstream latest release tags..."
+          GEOSITE_TAG=$(gh api repos/Loyalsoldier/v2ray-rules-dat/releases/latest --jq '.tag_name // .name' 2>/dev/null || echo "")
+          GEOIP_TAG=$(gh api repos/Loyalsoldier/geoip/releases/latest --jq '.tag_name // .name' 2>/dev/null || echo "")
+          echo "Upstream Geosite Tag: ${GEOSITE_TAG}"
+          echo "Upstream GeoIP Tag:   ${GEOIP_TAG}"
+
+          echo "geosite_tag=${GEOSITE_TAG}" >> $GITHUB_OUTPUT
+          echo "geoip_tag=${GEOIP_TAG}" >> $GITHUB_OUTPUT
+
+          CURRENT_REL=$(gh api repos/${{ github.repository }}/releases/latest 2>/dev/null || echo "")
+          CURRENT_TAG=$(echo "$CURRENT_REL" | jq -r '.tag_name // ""' 2>/dev/null || echo "")
+          CURRENT_NAME=$(echo "$CURRENT_REL" | jq -r '.name // ""' 2>/dev/null || echo "")
+          echo "Current Repository Latest Release Tag:  ${CURRENT_TAG}"
+          echo "Current Repository Latest Release Name: ${CURRENT_NAME}"
+
+          if [ -z "$CURRENT_TAG" ]; then
+            echo "No existing releases found in current repository. First build required."
+            echo "need_update=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Check if current release already covers the latest upstream tags
+          GEOSITE_MATCH=false
+          GEOIP_MATCH=false
+          if [ -n "$GEOSITE_TAG" ] && (echo "$CURRENT_TAG $CURRENT_NAME" | grep -q "$GEOSITE_TAG"); then
+            GEOSITE_MATCH=true
+          fi
+          if [ -n "$GEOIP_TAG" ] && (echo "$CURRENT_TAG $CURRENT_NAME" | grep -q "$GEOIP_TAG"); then
+            GEOIP_MATCH=true
+          fi
+
+          if [ "$GEOSITE_MATCH" = "true" ] && [ "$GEOIP_MATCH" = "true" ]; then
+            echo "Both upstream rules (Geosite: ${GEOSITE_TAG}, GeoIP: ${GEOIP_TAG}) are already up to date in latest release."
+            echo "need_update=false" >> $GITHUB_OUTPUT
+          else
+            echo "New upstream release detected! (Geosite updated: $([ "$GEOSITE_MATCH" = "true" ] && echo 'No' || echo 'Yes'), GeoIP updated: $([ "$GEOIP_MATCH" = "true" ] && echo 'No' || echo 'Yes'))"
+            echo "need_update=true" >> $GITHUB_OUTPUT
+          fi
+
   build:
-    name: Build
+    name: Build & Release
+    needs: check
+    if: needs.check.outputs.need_update == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          
+
       - name: Setup Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v5
         with:
           go-version: "1.23"
-      
-      - name: Build geosite
-        id: build_site
+          cache-dependency-path: |
+            sing-geosite/go.sum
+            sing-geoip/go.sum
+
+      - name: Build geosite and geoip in parallel
+        id: build_all
         run: |
-          cd sing-geosite
-          go run -v .
-      - name: Build geoip
-        id: build_ip
-        run: |
-          cd sing-geoip
-          go run -v .
-      
-      - name: Release rule sets
-        if: steps.build.outputs.skip != 'true'
-        run: .github/release-rule-set.sh
+          echo "Starting parallel compilation with multi-core worker pool..."
+          export NO_SKIP="true"
+
+          (
+            cd sing-geosite
+            echo "Building sing-geosite..."
+            go run .
+            echo "sing-geosite build finished."
+          ) &
+          PID_SITE=$!
+
+          (
+            cd sing-geoip
+            echo "Building sing-geoip..."
+            go run .
+            echo "sing-geoip build finished."
+          ) &
+          PID_IP=$!
+
+          wait $PID_SITE
+          wait $PID_IP
+          echo "All rule sets compiled successfully."
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get current time
-        id: time
-        run: echo "time=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_OUTPUT
-      
-      - name: Create a release
-        id: create_release
-        uses: actions/create-release@v1
+      - name: Release rule-set branches
+        run: |
+          chmod +x .github/release-rule-set.sh
+          .github/release-rule-set.sh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare release packages and assets
+        run: |
+          mkdir -p release-assets
+
+          # 1. Package zip archives
+          echo "Packaging geosite-srs.zip..."
+          cd sing-geosite/rule-set
+          zip -9 -q ../../release-assets/geosite-srs.zip *.srs
+          cd ../..
+
+          echo "Packaging geoip-srs.zip..."
+          cd sing-geoip/rule-set
+          zip -9 -q ../../release-assets/geoip-srs.zip *.srs
+          cd ../..
+
+          echo "Packaging rules-srs.zip..."
+          zip -9 -q release-assets/rules-srs.zip sing-geosite/rule-set/*.srs sing-geoip/rule-set/*.srs
+
+          # 2. Extract popular standalone .srs files
+          POPULAR_GEOSITE=(
+            "geosite-cn.srs"
+            "geosite-geolocation-cn.srs"
+            "geosite-geolocation-!cn.srs"
+            "geosite-category-ads-all.srs"
+            "geosite-gfw.srs"
+            "geosite-tld-cn.srs"
+            "geosite-tld-!cn.srs"
+            "geosite-apple.srs"
+            "geosite-apple-cn.srs"
+            "geosite-google.srs"
+            "geosite-google-cn.srs"
+            "geosite-microsoft.srs"
+            "geosite-github.srs"
+            "geosite-telegram.srs"
+            "geosite-twitter.srs"
+            "geosite-youtube.srs"
+            "geosite-netflix.srs"
+            "geosite-openai.srs"
+            "geosite-bilibili.srs"
+            "geosite-bahamut.srs"
+            "geosite-spotify.srs"
+            "geosite-steam.srs"
+            "geosite-disney.srs"
+            "geosite-tiktok.srs"
+          )
+          for file in "${POPULAR_GEOSITE[@]}"; do
+            if [ -f "sing-geosite/rule-set/${file}" ]; then
+              cp "sing-geosite/rule-set/${file}" release-assets/
+            fi
+          done
+
+          POPULAR_GEOIP=(
+            "geoip-cn.srs"
+            "geoip-private.srs"
+            "geoip-hk.srs"
+            "geoip-tw.srs"
+            "geoip-jp.srs"
+            "geoip-us.srs"
+            "geoip-sg.srs"
+            "geoip-telegram.srs"
+            "geoip-netflix.srs"
+            "geoip-google.srs"
+          )
+          for file in "${POPULAR_GEOIP[@]}"; do
+            if [ -f "sing-geoip/rule-set/${file}" ]; then
+              cp "sing-geoip/rule-set/${file}" release-assets/
+            fi
+          done
+
+          # 3. Copy legacy .db files for backward compatibility
+          [ -f "sing-geosite/geosite.db" ] && cp "sing-geosite/geosite.db" release-assets/
+          [ -f "sing-geosite/geosite-cn.db" ] && cp "sing-geosite/geosite-cn.db" release-assets/
+          [ -f "sing-geoip/geoip.db" ] && cp "sing-geoip/geoip.db" release-assets/
+          [ -f "sing-geoip/geoip-cn.db" ] && cp "sing-geoip/geoip-cn.db" release-assets/
+
+          # 4. Generate sha256 checksums
+          cd release-assets
+          sha256sum * > sha256sum.txt || true
+          cd ..
+          ls -lh release-assets
+
+      - name: Generate release tag & metadata
+        id: release_meta
+        run: |
+          GEOSITE_TAG="${{ needs.check.outputs.geosite_tag }}"
+          GEOIP_TAG="${{ needs.check.outputs.geoip_tag }}"
+          TAG="${GEOSITE_TAG}"
+          if [ -z "$TAG" ]; then
+            TAG="${GEOIP_TAG}"
+          fi
+          if [ -z "$TAG" ]; then
+            TAG=$(date +'%Y%m%d%H%M')
+          fi
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "name=Release ${TAG} (Geosite: ${GEOSITE_TAG:-latest}, GeoIP: ${GEOIP_TAG:-latest})" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.time.outputs.time }}
-          release_name: ${{ steps.time.outputs.time }}
+          tag_name: ${{ steps.release_meta.outputs.tag }}
+          name: ${{ steps.release_meta.outputs.name }}
+          body: |
+            ### sing-box 优化规则集 (Rule Set .srs) 自动同步发布
+
+            - **上游 Geosite 版本**: `${{ needs.check.outputs.geosite_tag || 'latest' }}` (移植自 [Loyalsoldier/v2ray-rules-dat](https://github.com/Loyalsoldier/v2ray-rules-dat))
+            - **上游 GeoIP 版本**: `${{ needs.check.outputs.geoip_tag || 'latest' }}` (移植自 [Loyalsoldier/geoip](https://github.com/Loyalsoldier/geoip))
+            - **规则格式**: sing-box Rule Set v3 (`.srs` 二进制)
+            - **优化特性**:
+              - 域名前缀/后缀层级去重（规则精简超 50%，大幅降低客户端内存占用）
+              - IP CIDR 地址聚合与规范化排序
+              - 多核并发加速编译生成
+              - 提供全量压缩包 (`geosite-srs.zip`, `geoip-srs.zip`, `rules-srs.zip`)
+              - 常用热门规则提供单个 `.srs` 直接引用与下载
+
+            更多使用方法请参考 [README.md](https://github.com/${{ github.repository }}/blob/main/README.md)。
+          files: release-assets/*
           draft: false
           prerelease: false
-      
-      - name: Release geosite.db
-        uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./sing-geosite/geosite.db
-          asset_name: geosite.db
-          asset_content_type: application/octet-stream
-      
-      - name: Release geoip.db
-        uses: actions/upload-release-asset@v1
+
+      - name: Clean up older releases (keep latest 5)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./sing-geoip/geoip.db
-          asset_name: geoip.db
-          asset_content_type: application/octet-stream
-      
-      - name: Release geoip-cn.db
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./sing-geoip/geoip-cn.db
-          asset_name: geoip-cn.db
-          asset_content_type: application/octet-stream
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Pruning older releases to keep only the latest 5..."
+          gh release list --limit 100 --json tagName --jq '.[5:][].tagName' 2>/dev/null | while read -r old_tag; do
+            if [ -n "$old_tag" ]; then
+              echo "Deleting old release: ${old_tag}"
+              gh release delete "${old_tag}" -y --cleanup-tag || true
+            fi
+          done
+          echo "Release pruning finished."
