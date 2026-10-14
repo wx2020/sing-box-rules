@@ -138,48 +138,45 @@ jobs:
 
       - name: Prepare release packages and assets
         run: |
+          set +H
           mkdir -p release-assets
 
           # 1. Package zip archives
           echo "Packaging geosite-srs.zip..."
-          cd sing-geosite/rule-set
-          zip -9 -q ../../release-assets/geosite-srs.zip *.srs
-          cd ../..
+          (cd sing-geosite/rule-set && zip -9 -q ../../release-assets/geosite-srs.zip *.srs)
 
           echo "Packaging geoip-srs.zip..."
-          cd sing-geoip/rule-set
-          zip -9 -q ../../release-assets/geoip-srs.zip *.srs
-          cd ../..
+          (cd sing-geoip/rule-set && zip -9 -q ../../release-assets/geoip-srs.zip *.srs)
 
           echo "Packaging rules-srs.zip..."
           zip -9 -q release-assets/rules-srs.zip sing-geosite/rule-set/*.srs sing-geoip/rule-set/*.srs
 
           # 2. Extract popular standalone .srs files
           POPULAR_GEOSITE=(
-            "geosite-cn.srs"
-            "geosite-geolocation-cn.srs"
-            "geosite-geolocation-!cn.srs"
-            "geosite-category-ads-all.srs"
-            "geosite-gfw.srs"
-            "geosite-tld-cn.srs"
-            "geosite-tld-!cn.srs"
-            "geosite-apple.srs"
-            "geosite-apple-cn.srs"
-            "geosite-google.srs"
-            "geosite-google-cn.srs"
-            "geosite-microsoft.srs"
-            "geosite-github.srs"
-            "geosite-telegram.srs"
-            "geosite-twitter.srs"
-            "geosite-youtube.srs"
-            "geosite-netflix.srs"
-            "geosite-openai.srs"
-            "geosite-bilibili.srs"
-            "geosite-bahamut.srs"
-            "geosite-spotify.srs"
-            "geosite-steam.srs"
-            "geosite-disney.srs"
-            "geosite-tiktok.srs"
+            'geosite-cn.srs'
+            'geosite-geolocation-cn.srs'
+            'geosite-geolocation-!cn.srs'
+            'geosite-category-ads-all.srs'
+            'geosite-gfw.srs'
+            'geosite-tld-cn.srs'
+            'geosite-tld-!cn.srs'
+            'geosite-apple.srs'
+            'geosite-apple-cn.srs'
+            'geosite-google.srs'
+            'geosite-google-cn.srs'
+            'geosite-microsoft.srs'
+            'geosite-github.srs'
+            'geosite-telegram.srs'
+            'geosite-twitter.srs'
+            'geosite-youtube.srs'
+            'geosite-netflix.srs'
+            'geosite-openai.srs'
+            'geosite-bilibili.srs'
+            'geosite-bahamut.srs'
+            'geosite-spotify.srs'
+            'geosite-steam.srs'
+            'geosite-disney.srs'
+            'geosite-tiktok.srs'
           )
           for file in "${POPULAR_GEOSITE[@]}"; do
             if [ -f "sing-geosite/rule-set/${file}" ]; then
@@ -188,16 +185,16 @@ jobs:
           done
 
           POPULAR_GEOIP=(
-            "geoip-cn.srs"
-            "geoip-private.srs"
-            "geoip-hk.srs"
-            "geoip-tw.srs"
-            "geoip-jp.srs"
-            "geoip-us.srs"
-            "geoip-sg.srs"
-            "geoip-telegram.srs"
-            "geoip-netflix.srs"
-            "geoip-google.srs"
+            'geoip-cn.srs'
+            'geoip-private.srs'
+            'geoip-hk.srs'
+            'geoip-tw.srs'
+            'geoip-jp.srs'
+            'geoip-us.srs'
+            'geoip-sg.srs'
+            'geoip-telegram.srs'
+            'geoip-netflix.srs'
+            'geoip-google.srs'
           )
           for file in "${POPULAR_GEOIP[@]}"; do
             if [ -f "sing-geoip/rule-set/${file}" ]; then
