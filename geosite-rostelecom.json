@@ -1,0 +1,17 @@
+{
+  "version": 3,
+  "rules": [
+    {
+      "domain_suffix": [
+        "azbukainterneta.ru",
+        "more.tv",
+        "restream-media.net",
+        "restream.ru",
+        "rostelecom.ru",
+        "rt.ru",
+        "wink.am",
+        "wink.ru"
+      ]
+    }
+  ]
+}

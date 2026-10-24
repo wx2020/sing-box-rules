@@ -1,0 +1,13 @@
+{
+  "version": 3,
+  "rules": [
+    {
+      "domain_suffix": [
+        "laiyagushi.com",
+        "vzuu.com",
+        "zhihu.com",
+        "zhimg.com"
+      ]
+    }
+  ]
+}
