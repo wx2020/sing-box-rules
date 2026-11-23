@@ -171,6 +171,7 @@ jobs:
             'geosite-youtube.srs'
             'geosite-netflix.srs'
             'geosite-openai.srs'
+            'geosite-anthropic.srs'
             'geosite-bilibili.srs'
             'geosite-bahamut.srs'
             'geosite-spotify.srs'
