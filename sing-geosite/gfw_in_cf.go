@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -78,16 +79,46 @@ func ipInCloudflare(ip net.IP) bool {
 	return false
 }
 
-// domainResolvesToCF 用系统 resolver 解析域名（CI 境外直连，无需 DoH），
-// 解析结果任一 IP 落在 CF 官方段即判命中。
+// domainResolvesToCF 用 DoH（8.8.8.8 / 1.1.1.1）解析域名，解析结果任一 IP
+// 落在 CF 官方段即判命中。CI 在境外直连 DoH——不用系统 resolver（net.LookupIP，
+// 它对 x.com 返回 Twitter 真实 IP 157.240.x 而非 CF 边缘，导致 x.com 漏判），
+// 更不能用国内 UDP（223.5.5.5 返回污染/调度 IP）。DoH 与设备上 smartdns 的
+// default 组（8.8.8.8/1.1.1.1 via proxy）同视角，能拿到 CF anycast IP。
 func domainResolvesToCF(domain string) bool {
-	ips, err := net.LookupIP(domain)
-	if err != nil || len(ips) == 0 {
-		return false
+	urls := []string{
+		"https://dns.google/resolve?name=" + domain + "&type=A",
+		"https://cloudflare-dns.com/dns-query?name=" + domain + "&type=A",
 	}
-	for _, ip := range ips {
-		if ipInCloudflare(ip) {
-			return true
+	for _, u := range urls {
+		req, err := http.NewRequest(http.MethodGet, u, nil)
+		if err != nil {
+			continue
+		}
+		if strings.Contains(u, "cloudflare-dns") {
+			req.Header.Set("accept", "application/dns-json")
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			continue
+		}
+		var doc struct {
+			Answer []struct {
+				Type int    `json:"type"`
+				Data string `json:"data"`
+			} `json:"Answer"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&doc)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		for _, a := range doc.Answer {
+			if a.Type != 1 {
+				continue
+			}
+			if ip := net.ParseIP(a.Data); ip != nil && ipInCloudflare(ip) {
+				return true
+			}
 		}
 	}
 	return false
