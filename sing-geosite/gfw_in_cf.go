@@ -118,17 +118,21 @@ func buildGFWInCF(domainMap map[string][]geosite.Item, ruleSetOutput string) err
 	sort.Strings(domains)
 
 	// 并发解析（境外 runner 上系统 resolver 即真实答案）
-	workers := runtime.NumCPU() * 4
-	if workers < 8 {
-		workers = 8
+	workers := 64
+	if n := runtime.NumCPU() * 4; n > workers {
+		workers = n
+	}
+	type job struct {
+		idx    int
+		domain string
 	}
 	type result struct {
 		domain string
 		hit    bool
 	}
-	jobs := make(chan string, len(domains))
-	for _, d := range domains {
-		jobs <- d
+	jobs := make(chan job, len(domains))
+	for i, d := range domains {
+		jobs <- job{idx: i, domain: d}
 	}
 	close(jobs)
 
@@ -136,13 +140,12 @@ func buildGFWInCF(domainMap map[string][]geosite.Item, ruleSetOutput string) err
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
-		go func(idx int) {
+		go func() {
 			defer wg.Done()
-			for d := range jobs {
-				results[idx] = result{domain: d, hit: domainResolvesToCF(d)}
-				idx += workers
+			for j := range jobs {
+				results[j.idx] = result{domain: j.domain, hit: domainResolvesToCF(j.domain)}
 			}
-		}(i)
+		}()
 	}
 	wg.Wait()
 
