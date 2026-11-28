@@ -438,6 +438,12 @@ func generate(release *github.RepositoryRelease, output string, cnOutput string,
 		return firstErr
 	}
 
+	// geosite-gfw-in-cf：gfw 域名中「上游解析落在 Cloudflare 段」的子集。
+	// CI 在境外直连解析（无墙），无需 DoH/代理；失败仅告警不阻断主流程。
+	if gfwErr := buildGFWInCF(domainMap, ruleSetOutput); gfwErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: geosite-gfw-in-cf build skipped: %v\n", gfwErr)
+	}
+
 	return nil
 }
 

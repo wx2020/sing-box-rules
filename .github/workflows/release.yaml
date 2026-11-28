@@ -158,6 +158,7 @@ jobs:
             'geosite-geolocation-!cn.srs'
             'geosite-category-ads-all.srs'
             'geosite-gfw.srs'
+            'geosite-gfw-in-cf.srs'
             'geosite-tld-cn.srs'
             'geosite-tld-!cn.srs'
             'geosite-apple.srs'
