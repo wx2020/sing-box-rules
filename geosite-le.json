@@ -1,0 +1,18 @@
+{
+  "version": 3,
+  "rules": [
+    {
+      "domain_suffix": [
+        "le.com",
+        "leautolink.com",
+        "lecloud.com",
+        "lecloudapi.com",
+        "lemall.com",
+        "leso.cn",
+        "letv.com",
+        "letvcdn.com",
+        "letvimg.com"
+      ]
+    }
+  ]
+}

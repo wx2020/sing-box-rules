@@ -1,0 +1,19 @@
+{
+  "version": 3,
+  "rules": [
+    {
+      "domain": "ykimg.alicdn.com",
+      "domain_suffix": [
+        "9xsecndns.cn",
+        "kumiao.com",
+        "soku.com",
+        "tudou.com",
+        "ykimg.com",
+        "youku.com",
+        "youku.tv",
+        "youkuhonor.com",
+        "youkuplay.com"
+      ]
+    }
+  ]
+}
